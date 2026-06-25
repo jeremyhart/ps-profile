@@ -150,15 +150,24 @@ Set-PSReadLineOption -BellStyle None
 
 # CompletionPredictor: provides IntelliSense-style command predictions in PSReadLine,
 # suggesting completions inline as you type based on command history and context.
+# Requires PowerShell 7.2+, so it's skipped on Windows PowerShell 5.1.
 # Installed automatically on first launch if it isn't already present.
-try {
-    Import-Module CompletionPredictor -ErrorAction Stop
-}
-catch {
-    Write-Host "CompletionPredictor module not found. Installing..." -ForegroundColor Yellow
-    Install-Module CompletionPredictor -Scope CurrentUser -Force -AcceptLicense
-    Import-Module CompletionPredictor
-    Write-Host "CompletionPredictor installed and loaded." -ForegroundColor Green
+if ($PSVersionTable.PSVersion -ge [version]'7.2') {
+    try {
+        Import-Module CompletionPredictor -ErrorAction Stop
+    }
+    catch {
+        Write-Host "CompletionPredictor module not found. Installing..." -ForegroundColor Yellow
+        # PSGallery requires TLS 1.2; older PowerShell defaults to TLS 1.0.
+        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+        # Ensure the NuGet provider is present, otherwise Install-Module prompts to bootstrap it.
+        if (-not (Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue)) {
+            Install-PackageProvider -Name NuGet -Scope CurrentUser -Force | Out-Null
+        }
+        Install-Module CompletionPredictor -Scope CurrentUser -Force
+        Import-Module CompletionPredictor
+        Write-Host "CompletionPredictor installed and loaded." -ForegroundColor Green
+    }
 }
 
 #endregion
