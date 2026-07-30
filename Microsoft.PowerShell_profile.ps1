@@ -170,4 +170,68 @@ if ($PSVersionTable.PSVersion -ge [version]'7.2') {
     }
 }
 
+
+# Compress a directory to a zip file, excluding files matched by .gitignore
+function Compress-WithGitignore {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path,
+        [string]$DestinationPath
+    )
+
+    $Path = (Resolve-Path $Path).Path
+    if (-not (Test-Path $Path -PathType Container)) {
+        Write-Host "Error: '$Path' is not a directory" -ForegroundColor Red
+        return
+    }
+
+    if (-not $DestinationPath) {
+        $DestinationPath = Join-Path (Split-Path $Path -Parent) ("{0}.zip" -f (Split-Path $Path -Leaf))
+    }
+
+    if (Test-Path $DestinationPath) {
+        Remove-Item -Path $DestinationPath -Force
+    }
+
+    Push-Location $Path
+    try {
+        if ((Get-Command git -ErrorAction SilentlyContinue) -and (Test-Path (Join-Path $Path ".gitignore"))) {
+            # Use git to list files not excluded by .gitignore (includes untracked, excludes ignored)
+            $Files = git ls-files --cached --others --exclude-standard 2>$null
+        }
+        else {
+            Write-Host "Warning: git or .gitignore not found, including all files" -ForegroundColor Yellow
+            $Files = Get-ChildItem -Path $Path -Recurse -File | ForEach-Object {
+                [System.IO.Path]::GetRelativePath($Path, $_.FullName)
+            }
+        }
+
+        if (-not $Files) {
+            Write-Host "Error: No files to compress" -ForegroundColor Red
+            return
+        }
+
+        # Stage files in a temp directory preserving relative structure, then compress
+        $StagingDir = New-TemporaryDirectory
+        try {
+            foreach ($File in $Files) {
+                $SourceFile = Join-Path $Path $File
+                if (Test-Path $SourceFile -PathType Leaf) {
+                    $TargetFile = Join-Path $StagingDir.FullName $File
+                    New-Item -Path (Split-Path $TargetFile -Parent) -ItemType Directory -Force | Out-Null
+                    Copy-Item -Path $SourceFile -Destination $TargetFile -Force
+                }
+            }
+            Compress-Archive -Path (Join-Path $StagingDir.FullName "*") -DestinationPath $DestinationPath -Force
+            Write-Host "✓ Created: $DestinationPath" -ForegroundColor Green
+        }
+        finally {
+            Remove-Item -Path $StagingDir.FullName -Recurse -Force
+        }
+    }
+    finally {
+        Pop-Location
+    }
+}
+
 #endregion
