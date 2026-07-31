@@ -1,175 +1,295 @@
 <#
-    Microsoft.PowerShell_profile.ps1
+.SYNOPSIS
+    PowerShell profile — shell configuration, Unix-style helpers, and utilities.
 
-    Personal PowerShell profile: console setup, Unix-style helper functions,
-    and PSReadLine quality-of-life tweaks. Designed to be safe to load on a
-    fresh machine — missing modules are installed on first launch.
+.DESCRIPTION
+    Loaded automatically by PowerShell on startup. Sets the console to UTF-8,
+    configures PSReadLine, imports modules, and defines a handful of convenience
+    functions and aliases.
 
-    Compatible with Windows PowerShell 5.1+.
+.NOTES
+    Author : Jeremy Hart
+    Path   : $PROFILE
 #>
 
-#region Console
+#region Console & Encoding
 
 # Use UTF-8 for input and output so emoji, accents, and box-drawing render correctly.
 [console]::InputEncoding = [console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
 
 #endregion
 
-#region Functions
+#region Modules & PSReadLine
+
+Import-Module ExtractMP3 -WarningAction SilentlyContinue
+Import-Module CompletionPredictor
+
+Set-PSReadLineOption -ShowToolTips:$true
+Set-PSReadLineOption -BellStyle None
+
+#endregion
+
+#region Unix-style helpers
 
 function open {
     <#
     .SYNOPSIS
-        Opens a path in its default handler.
-    .DESCRIPTION
-        Files launch in their default app; folders open in Explorer.
-        Defaults to the current directory. Accepts pipeline input.
-    .PARAMETER target
-        The file or folder path to open. Defaults to the current directory.
-    .EXAMPLE
-        open report.pdf
-    .EXAMPLE
-        "a.txt", "b.txt" | open
+        Open a path in File Explorer (defaults to the current directory).
     #>
-    param(
-        [Parameter(ValueFromPipeline = $true)]
-        [string]$target = "."
-    )
+    param([string]$Target = '.')
 
-    process {
-        $path = Resolve-Path -LiteralPath $target -ErrorAction SilentlyContinue
-        if (-not $path) {
-            Write-Error "Path not found: $target"
-            return
-        }
-        Invoke-Item -LiteralPath $path
-    }
+    Start-Process explorer.exe (Resolve-Path $Target)
 }
 
 function touch {
     <#
     .SYNOPSIS
-        Updates a file's timestamp, creating it if it doesn't exist.
-    .DESCRIPTION
-        Mirrors the Unix `touch`. Accepts multiple paths and pipeline input.
-    .EXAMPLE
-        touch newfile.txt
-    .EXAMPLE
-        "a.txt", "b.txt" | touch
+        Update a file's timestamp, or create it if it doesn't exist.
     #>
-    param(
-        [Parameter(Mandatory, ValueFromPipeline = $true, ValueFromRemainingArguments = $true)]
-        [string[]]$Path
-    )
+    param([Parameter(Mandatory)][string]$Path)
 
-    process {
-        foreach ($p in $Path) {
-            if (Test-Path -LiteralPath $p) {
-                (Get-Item -LiteralPath $p).LastWriteTime = Get-Date
-            } else {
-                New-Item -ItemType File -Path $p | Out-Null
-            }
-        }
+    if (Test-Path $Path) {
+        (Get-Item $Path).LastWriteTime = Get-Date
+    }
+    else {
+        New-Item -ItemType File -Path $Path | Out-Null
     }
 }
 
 function extract {
     <#
     .SYNOPSIS
-        Extracts a .zip archive into a folder named after the archive.
-    .DESCRIPTION
-        Wraps Expand-Archive. Each archive is extracted into a subfolder
-        (next to it) named after the archive, so contents aren't scattered.
-        Accepts multiple paths and pipeline input.
-    .EXAMPLE
-        extract release.zip
-    .EXAMPLE
-        Get-ChildItem *.zip | extract
+        Extract a zip archive into the folder that contains it.
     #>
-    param(
-        [Parameter(Mandatory, ValueFromPipeline = $true, ValueFromRemainingArguments = $true)]
-        [string[]]$File
-    )
+    param([Parameter(Mandatory)][string]$File)
 
-    process {
-        foreach ($f in $File) {
-            $path = Resolve-Path -LiteralPath $f -ErrorAction SilentlyContinue
-            if (-not $path) {
-                Write-Error "Archive not found: $f"
-                continue
-            }
-            $name = [System.IO.Path]::GetFileNameWithoutExtension($path.Path)
-            $dest = Join-Path (Split-Path $path.Path -Parent) $name
-            Expand-Archive -LiteralPath $path.Path -DestinationPath $dest -Force
-        }
-    }
+    Expand-Archive -LiteralPath $File -DestinationPath (Split-Path $File -Parent) -Force
 }
 
 function which {
     <#
     .SYNOPSIS
-        Shows where a command resolves, like the Unix `which`.
-    .DESCRIPTION
-        Prints the executable path for external programs, and falls back to the
-        resolved definition for aliases, functions, and cmdlets (which have no
-        file path). Accepts multiple commands and pipeline input.
-    .EXAMPLE
-        which git
-    .EXAMPLE
-        "git", "code" | which
+        Print the full path of a command, like the Unix `which`.
     #>
+    param([Parameter(Mandatory)][string]$Command)
+
+    Get-Command $Command | Select-Object -ExpandProperty Path
+}
+
+#endregion
+
+#region Audio transcription
+
+function Invoke-Transcription {
+    <#
+    .SYNOPSIS
+        Transcribe an audio file to text using OpenAI Whisper (CUDA).
+
+    .DESCRIPTION
+        Runs Whisper on the GPU and reports live progress by parsing the
+        timestamps in its output against the file's total duration (via ffprobe).
+        The finished transcript is moved to the requested output path.
+
+    .PARAMETER File
+        Path to the audio file to transcribe.
+
+    .PARAMETER Output
+        Destination text file. Defaults to the input path with a .txt extension.
+
+    .PARAMETER Model
+        Whisper model to use (e.g. tiny, base, small, medium, large). Default: medium.
+
+    .PARAMETER Timestamps
+        Include per-word timestamps in the transcript.
+
+    .EXAMPLE
+        transcribe interview.m4a
+        transcribe lecture.mp3 -Model large -Timestamps
+
+    .NOTES
+        Requires whisper and ffprobe on PATH, plus a CUDA-capable GPU.
+    #>
+    [CmdletBinding()]
     param(
-        [Parameter(Mandatory, ValueFromPipeline = $true, ValueFromRemainingArguments = $true)]
-        [string[]]$Command
+        [Parameter(Mandatory)][string]$File,
+        [string]$Output = ([System.IO.Path]::ChangeExtension($File, 'txt')),
+        [string]$Model = 'medium',
+        [switch]$Timestamps
     )
 
-    process {
-        foreach ($c in $Command) {
-            $cmd = Get-Command $c -ErrorAction SilentlyContinue
-            if (-not $cmd) {
-                Write-Error "Command not found: $c"
-                continue
+    $tempDir = [System.IO.Path]::GetTempPath()
+    $tsValue = if ($Timestamps) { 'True' } else { 'False' }
+    $duration = [double](& ffprobe -v quiet -show_entries format=duration -of csv=p=0 $File 2>$null)
+    $env:PYTHONUNBUFFERED = '1'
+
+    & whisper $File --model $Model --device cuda --output_dir $tempDir `
+        --output_format txt --verbose True --word_timestamps $tsValue 2>&1 |
+    ForEach-Object {
+        $line = $_.ToString()
+        if ($duration -gt 0 -and $line -match '\[[\d:.]+ --> ([\d:.]+)\]') {
+            $parts = $matches[1] -split '[:\.]'
+            $secs = if ($parts.Count -eq 4) {
+                [int]$parts[0] * 3600 + [int]$parts[1] * 60 + [int]$parts[2] + [int]$parts[3] / 1000.0
             }
-            if ($cmd.Path) { $cmd.Path } else { $cmd.Definition }
+            else {
+                [int]$parts[0] * 60 + [int]$parts[1] + [int]$parts[2] / 1000.0
+            }
+            $pct = [math]::Min(100, [math]::Round($secs / $duration * 100))
+            Write-Progress -Activity 'Transcribing' -Status "$pct%" -PercentComplete $pct
         }
+    }
+
+    Write-Progress -Activity 'Transcribing' -Completed
+
+    $inputBase = [System.IO.Path]::GetFileNameWithoutExtension($File)
+    Move-Item (Join-Path $tempDir "$inputBase.txt") $Output -Force
+    Write-Host "Done -> $Output"
+}
+
+Set-Alias transcribe Invoke-Transcription
+
+function skills {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Command,
+        
+        [Parameter(ValueFromRemainingArguments = $true)]
+        [string[]]$Args
+    )
+
+    if ($Command -eq "add") {
+        if ($Args.Count -eq 0) {
+            Write-Host "Usage: skills add <path>" -ForegroundColor Red
+            return
+        }
+
+        $SkillPath = $Args[0] -replace '^["'']|["'']$'  # Remove quotes if present
+        
+        # Resolve to full path
+        $FullPath = Resolve-Path -Path $SkillPath -ErrorAction SilentlyContinue
+        if (-not $FullPath) {
+            Write-Host "Error: Path not found: $SkillPath" -ForegroundColor Red
+            return
+        }
+        
+        $FullPath = $FullPath.Path
+        
+        # Check if it's a directory with SKILL.md
+        if ((Test-Path -Path $FullPath -PathType Container)) {
+            $SkillFile = Join-Path $FullPath "SKILL.md"
+            if (-not (Test-Path $SkillFile)) {
+                Write-Host "Error: SKILL.md not found in $FullPath" -ForegroundColor Red
+                return
+            }
+            $SourceDir = $FullPath
+        }
+        # Check if it's a .skill or .zip file (try to extract)
+        elseif ($FullPath -match '\.(skill|zip)$' -and (Test-Path -Path $FullPath -PathType Leaf)) {
+            Write-Host "Extracting archive..." -ForegroundColor Cyan
+            $TempDir = New-TemporaryDirectory
+            Expand-Archive -Path $FullPath -DestinationPath $TempDir -Force
+            
+            $SkillFile = Join-Path $TempDir "SKILL.md"
+            if (-not (Test-Path $SkillFile)) {
+                # SKILL.md may be inside a single top-level folder in the archive
+                $SubDirs = Get-ChildItem -Path $TempDir -Directory
+                if ($SubDirs.Count -eq 1 -and (Test-Path (Join-Path $SubDirs[0].FullName "SKILL.md"))) {
+                    $SourceDir = $SubDirs[0].FullName
+                }
+                else {
+                    Write-Host "Error: SKILL.md not found in archive" -ForegroundColor Red
+                    Remove-Item -Path $TempDir -Recurse -Force
+                    return
+                }
+            }
+            else {
+                $SourceDir = $TempDir
+            }
+        }
+        else {
+            Write-Host "Error: Must be a directory containing SKILL.md or a .skill/.zip archive file" -ForegroundColor Red
+            return
+        }
+
+        # Extract skill name from SKILL.md frontmatter
+        $Content = Get-Content -Path (Join-Path $SourceDir "SKILL.md") -Raw
+        if ($Content -match 'name:\s*([^\n\r]+)') {
+            $SkillName = $Matches[1].Trim()
+        }
+        else {
+            $SkillName = Split-Path -Leaf $SourceDir
+        }
+
+        # Prompt for scope
+        Write-Host "`nWhere do you want to install '$SkillName'?" -ForegroundColor Cyan
+        Write-Host "1) Globally (~/.copilot/skills/ or ~/.agents/skills/)"
+        Write-Host "2) Project (./.github/skills/ or ./.agents/skills/)"
+        Write-Host ""
+        $Choice = Read-Host "Enter choice (1 or 2)"
+
+        $DestDir = $null
+
+        if ($Choice -eq "1") {
+            $GlobalDir = Join-Path $env:USERPROFILE ".copilot" "skills" $SkillName
+            New-Item -Path (Split-Path $GlobalDir) -ItemType Directory -Force | Out-Null
+            Copy-Item -Path $SourceDir -Destination $GlobalDir -Recurse -Force
+            $DestDir = $GlobalDir
+            Write-Host "✓ Installed: $GlobalDir" -ForegroundColor Green
+        }
+        elseif ($Choice -eq "2") {
+            # Try different project root markers
+            $ProjectRoot = Get-Location
+            $Found = $false
+            
+            while ($ProjectRoot.Path -ne $ProjectRoot.Drive.Name) {
+                if ((Test-Path (Join-Path $ProjectRoot ".git")) -or 
+                    (Test-Path (Join-Path $ProjectRoot ".github")) -or
+                    (Test-Path (Join-Path $ProjectRoot "package.json"))) {
+                    $Found = $true
+                    break
+                }
+                $ProjectRoot = Split-Path $ProjectRoot
+            }
+
+            if (-not $Found) {
+                Write-Host "Error: Could not find project root" -ForegroundColor Red
+                if ($SourceDir -like "$env:TEMP*") {
+                    Remove-Item -Path $SourceDir -Recurse -Force
+                }
+                return
+            }
+
+            $ProjectSkillsDir = Join-Path $ProjectRoot ".github" "skills" $SkillName
+            New-Item -Path (Split-Path $ProjectSkillsDir) -ItemType Directory -Force | Out-Null
+            Copy-Item -Path $SourceDir -Destination $ProjectSkillsDir -Recurse -Force
+            $DestDir = $ProjectSkillsDir
+            Write-Host "✓ Installed: $ProjectSkillsDir" -ForegroundColor Green
+        }
+        else {
+            Write-Host "Invalid choice. Cancelled." -ForegroundColor Red
+        }
+
+        # Cleanup temp directory if it was extracted
+        if ($SourceDir -like "$env:TEMP*") {
+            Remove-Item -Path $SourceDir -Recurse -Force
+        }
+
+        if ($DestDir) {
+            Write-Host "`nInstalled to: $DestDir" -ForegroundColor Green
+        }
+    }
+    else {
+        Write-Host "Unknown command: $Command" -ForegroundColor Red
+        Write-Host "Usage: skills add <path>" -ForegroundColor Gray
     }
 }
 
-#endregion
-
-#region PSReadLine
-
-# Show parameter tooltips inline while typing completions.
-Set-PSReadLineOption -ShowToolTips:$true
-# Silence the terminal bell (no beep/flash on errors or unmatched completions).
-Set-PSReadLineOption -BellStyle None
-
-#endregion
-
-#region Modules
-
-# CompletionPredictor: provides IntelliSense-style command predictions in PSReadLine,
-# suggesting completions inline as you type based on command history and context.
-# Requires PowerShell 7.2+, so it's skipped on Windows PowerShell 5.1.
-# Installed automatically on first launch if it isn't already present.
-if ($PSVersionTable.PSVersion -ge [version]'7.2') {
-    try {
-        Import-Module CompletionPredictor -ErrorAction Stop
-    }
-    catch {
-        Write-Host "CompletionPredictor module not found. Installing..." -ForegroundColor Yellow
-        # PSGallery requires TLS 1.2; older PowerShell defaults to TLS 1.0.
-        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-        # Ensure the NuGet provider is present, otherwise Install-Module prompts to bootstrap it.
-        if (-not (Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue)) {
-            Install-PackageProvider -Name NuGet -Scope CurrentUser -Force | Out-Null
-        }
-        Install-Module CompletionPredictor -Scope CurrentUser -Force
-        Import-Module CompletionPredictor
-        Write-Host "CompletionPredictor installed and loaded." -ForegroundColor Green
-    }
+# Helper function for PowerShell 6 compatibility
+function New-TemporaryDirectory {
+    $Parent = [System.IO.Path]::GetTempPath()
+    $Name = [System.IO.Path]::GetRandomFileName()
+    New-Item -ItemType Directory -Path (Join-Path $Parent $Name)
 }
-
 
 # Compress a directory to a zip file, excluding files matched by .gitignore
 function Compress-WithGitignore {
@@ -233,5 +353,6 @@ function Compress-WithGitignore {
         Pop-Location
     }
 }
+
 
 #endregion
