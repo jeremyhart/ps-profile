@@ -29,6 +29,39 @@ Set-PSReadLineOption -BellStyle None
 
 #endregion
 
+#region Coreutils
+
+<#
+    Microsoft Coreutils for Windows installs to "C:\Program Files\coreutils\bin".
+
+    PowerShell resolves names in the order Alias > Function > Cmdlet > Application,
+    so the built-in aliases (ls, cat, cp, ...) shadow the coreutils binaries even
+    when the bin folder is on PATH. The aliases have to be removed for the
+    binaries to win.
+
+    Everything here is guarded by the bin folder existing. If coreutils isn't
+    installed, the aliases are left alone and the shell behaves as normal.
+#>
+
+$CoreutilsBin = Join-Path $env:ProgramFiles 'coreutils\bin'
+
+if (Test-Path $CoreutilsBin) {
+
+    # Only remove an alias when a matching .exe is actually there, so nothing is
+    # stripped without a replacement to fall through to.
+    Get-Alias | ForEach-Object {
+        if (Test-Path (Join-Path $CoreutilsBin "$($_.Name).exe")) {
+            Remove-Item -Path "Alias:$($_.Name)" -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    # winget doesn't add coreutils to PATH, so put it first for this session.
+    $pathEntries = @($env:PATH -split ';' | Where-Object { $_ -and $_ -ne $CoreutilsBin })
+    $env:PATH = (@($CoreutilsBin) + $pathEntries) -join ';'
+}
+
+#endregion
+
 #region Unix-style helpers
 
 function open {
@@ -152,7 +185,7 @@ function skills {
     param(
         [Parameter(Mandatory = $true)]
         [string]$Command,
-        
+
         [Parameter(ValueFromRemainingArguments = $true)]
         [string[]]$Args
     )
@@ -164,16 +197,16 @@ function skills {
         }
 
         $SkillPath = $Args[0] -replace '^["'']|["'']$'  # Remove quotes if present
-        
+
         # Resolve to full path
         $FullPath = Resolve-Path -Path $SkillPath -ErrorAction SilentlyContinue
         if (-not $FullPath) {
             Write-Host "Error: Path not found: $SkillPath" -ForegroundColor Red
             return
         }
-        
+
         $FullPath = $FullPath.Path
-        
+
         # Check if it's a directory with SKILL.md
         if ((Test-Path -Path $FullPath -PathType Container)) {
             $SkillFile = Join-Path $FullPath "SKILL.md"
@@ -188,7 +221,7 @@ function skills {
             Write-Host "Extracting archive..." -ForegroundColor Cyan
             $TempDir = New-TemporaryDirectory
             Expand-Archive -Path $FullPath -DestinationPath $TempDir -Force
-            
+
             $SkillFile = Join-Path $TempDir "SKILL.md"
             if (-not (Test-Path $SkillFile)) {
                 # SKILL.md may be inside a single top-level folder in the archive
@@ -240,9 +273,9 @@ function skills {
             # Try different project root markers
             $ProjectRoot = Get-Location
             $Found = $false
-            
+
             while ($ProjectRoot.Path -ne $ProjectRoot.Drive.Name) {
-                if ((Test-Path (Join-Path $ProjectRoot ".git")) -or 
+                if ((Test-Path (Join-Path $ProjectRoot ".git")) -or
                     (Test-Path (Join-Path $ProjectRoot ".github")) -or
                     (Test-Path (Join-Path $ProjectRoot "package.json"))) {
                     $Found = $true
